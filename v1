@@ -1,0 +1,114 @@
+import cv2
+import pandas as pd
+import os
+import glob
+from datetime import timedelta
+
+def parse_video_starttime(filename):
+    """
+    Extracts the absolute start time from the video filename.
+    Example: 20240820-082645764698 -> 2024-08-20 08:26:45.764698
+    """
+    basename = os.path.basename(filename).split('.')[0]
+    date_str, time_str = basename.split('-')
+
+    # Reconstruct into a standard string Python can parse
+    formatted_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} {time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}.{time_str[6:12]}"
+    return pd.to_datetime(formatted_str)
+
+def extract_pure_set(video_folder_path, xlsx_path, base_output_dir="./pure_extracted_frames"):
+    print(f"Loading reality data from: {xlsx_path}...")
+    df = pd.read_excel(xlsx_path)
+
+    # 1. Clean and sort the Excel Time
+    df['Time'] = df['Time'].astype(str).str.replace(',', '.')
+    df['Time'] = pd.to_datetime(df['Time'])
+    df = df.sort_values(by='Time')
+    total_logs = len(df)
+    print(f"Loaded {total_logs} log entries.")
+
+    # 2. Setup Output Folder
+    excel_filename = os.path.splitext(os.path.basename(xlsx_path))[0]
+    output_dir = os.path.join(base_output_dir, excel_filename)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 3. Find and sort all videos
+    search_pattern = os.path.join(video_folder_path, "*.webm")
+    video_files = glob.glob(search_pattern)
+    videos = []
+    
+    for vf in video_files:
+        try:
+            start_time = parse_video_starttime(vf)
+            videos.append({'path': vf, 'start_time': start_time})
+        except Exception as e:
+            print(f"Skipping {os.path.basename(vf)}, couldn't parse time.")
+
+    videos.sort(key=lambda x: x['start_time'])
+    print(f"Found {len(videos)} videos. Synced and sorted chronologically.")
+
+    # --- THE STRICT REALITY SETTINGS ---
+    # We only accept a frame if it was taken within 2 milliseconds of the log
+    STRICT_TOLERANCE_MS = 2.0 
+    
+    log_idx = 0
+    extracted_count = 0
+
+    # 4. Process each video file
+    for vid_info in videos:
+        if log_idx >= total_logs:
+            break  # Finished all logs!
+
+        vid_path = vid_info['path']
+        vid_start_time = vid_info['start_time']
+        
+        cap = cv2.VideoCapture(vid_path)
+        print(f"\nScanning Video: {os.path.basename(vid_path)} for Pure Matches...")
+
+        while cap.isOpened() and log_idx < total_logs:
+            ret, frame = cap.read()
+            if not ret:
+                break # Video ended, move to next video file
+
+            # READ THE TRUE HARDWARE TIMESTAMP (Ignores variable frame rate drift)
+            real_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+            current_frame_time = vid_start_time + timedelta(milliseconds=real_msec)
+
+            # Check logs against this true frame time
+            while log_idx < total_logs:
+                target_log = df.iloc[log_idx]
+                target_time = target_log['Time']
+
+                # Difference in milliseconds
+                time_diff_ms = (target_time - current_frame_time).total_seconds() * 1000.0
+
+                # TEST 1: PERFECT MATCH
+                if abs(time_diff_ms) <= STRICT_TOLERANCE_MS:
+                    pore_size = target_log['pore_diameter']
+                    label = "pore" if pore_size > 0 else "normal"
+                    
+                    safe_time_str = target_time.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                    filename = f"PURE_{safe_time_str}_label_{label}_sz{pore_size:.3f}.jpg"
+                    filepath = os.path.join(output_dir, filename)
+                    
+                    cv2.imwrite(filepath, frame)
+                    extracted_count += 1
+                    log_idx += 1 # Move to next log
+                    
+                # TEST 2: LOG IS IN THE PAST
+                elif time_diff_ms < -STRICT_TOLERANCE_MS:
+                    # We missed this log (camera didn't click exactly when sensor fired). Skip it.
+                    log_idx += 1
+                    
+                # TEST 3: LOG IS IN THE FUTURE
+                else:
+                    # Need to advance the video to catch up to the log.
+                    break
+
+        cap.release()
+
+    print(f"\nDONE! Extracted {extracted_count} perfectly synced 'Pure' frames out of {total_logs} logs.")
+
+# --- RUN IT ---
+# Update these paths to match your system
+extract_pure_set("./video_data", "Annom_WorkObject1.xlsx", "./pure_extracted_frames")
